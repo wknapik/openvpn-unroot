@@ -1,0 +1,580 @@
+#!/usr/bin/env bash
+
+set -eEo pipefail
+shopt -s inherit_errexit
+
+# For the benefit of functions that "return" a string, but also print to a
+# user-supplied file in the case where the user chooses /dev/stdout.
+exec 6>&1
+
+# All globals.
+declare -A cleanup=() # keys: device, group, user
+declare -a cleanup_files=()
+declare -A opt=()
+readonly prog="$(basename "$0")"
+
+# $@  = ""
+# out = help_message
+help() {
+    echo -e "USAGE: $prog [options] <old_config_file>
+Generate everything needed to run an OpenVPN client as an unprivileged user,
+based on an existing OpenVPN client config
+  -a | --automagic\t\tuse all other switches with reasonable values
+  -B | --no-backup\t\tdo not create backups when overwriting files
+  -c | --(no-)config-file=ARG\t(do not) generate OpenVPN config file
+  -d | --device=ARG\t\tuse (create if does not exist) specified device
+  -g | --group=ARG\t\tuse (create if does not exist) specified group
+  -h | --help\t\t\tprint this help and exit
+  -i | --(no-)iproute-file=ARG\t(do not) generate sudo wrapper for \`ip'
+  -n | --(no-)netdev-file=ARG\t(do not) generate systemd netdev file for device
+  -p | --pretend\t\tdo not generate any files (only useful with -v)
+  -s | --(no-)sudoers-file=ARG\t(do not) generate sudoers file
+  -S | --skip=ARG\t\tsame as --no-<option>, comma-separated list
+  -u | --user=ARG\t\tuse (create if does not exist) specified user
+  -U | --(no-)unit-file=ARG\t(do not) generate systemd unit file
+  -v | --verbose\t\tprint additional information to stderr
+  -x | --(no-)up-file=ARG\t(do not) generate sudo wrapper for up script
+  -y | --(no-)down-file=ARG\t(do not) generate sudo wrapper for down script"
+  exit 2
+}
+
+# $@  = command_line
+# out = ""
+parse_command_line() {
+    local -r options=($(getopt -u \
+        -o aBc:d:g:hi:n:ps:S:u:U:vx:y: \
+        -l "$(echo automagic,no-backup,config-file:,no-config-file,device:,\
+                   group:,help,iproute-file:,no-iproute-file,netdev-file:,\
+                   no-netdev-file,pretend,sudoers-file:,no-sudoers-file,\
+                   skip:,user:,unit-file:,no-unit-file,verbose,up-file:,\
+                   no-up-file,down-file:,no-down-file|tr -d ' ')" \
+        -n "$prog" -- "$@" || true))
+
+    set -- "${options[@]}"
+    while true; do
+        case "$1" in
+            -a|--automagic) opt[automagic]=1; shift;;
+            -B|--no-backup) opt[no-backup]=1; shift;;
+            -c|--config-file) opt[config_file]="$2"; shift 2;;
+            -d|--device) opt[device]="$2"; shift 2;;
+            -g|--group) opt[group]="$2"; shift 2;;
+            -h|--help) help;;
+            -i|--iproute-file) opt[iproute_file]="$2"; shift 2;;
+            -n|--netdev-file) opt[netdev_file]="$2"; shift 2;;
+            -p|--pretend) opt[pretend]=1; shift;;
+            -s|--sudoers-file) opt[sudoers_file]="$2"; shift 2;;
+            --no-config-file|--no-iproute-file|--no-netdev-file|--no-sudoers-file|--no-unit-file|--no-up-file|--no-down-file)
+                opt["${1/--/}"]=1; shift;;
+            -S|--skip) skip=(--no-${2//,/ --no-}); shift 2;;
+            -u|--user) opt[user]="$2"; shift 2;;
+            -U|--unit-file) opt[unit_file]="$2"; shift 2;;
+            -v|--verbose) opt[verbose]=1; shift;;
+            -x|--up-file) opt[up_file]="$2"; shift 2;;
+            -y|--down-file) opt[down_file]="$2"; shift 2;;
+            --) shift;;&
+            *) if [[ -n "${skip[@]}" ]]; then
+                   set -- "${skip[@]}" -- "$@"
+                   unset skip
+               else
+                   break
+               fi;;
+        esac
+    done
+    opt[old_config_file]="$1"
+    readonly opt
+
+    if ! shift || [[ -n "$*" ]]; then
+        help
+    fi
+}
+    
+# $@  = message
+# out = ""
+maybe_verbose_maybe_pretend() {
+    local -r message="${*:?}"
+    [[ -z "${opt[verbose]}" ]] || echo "INFO: $message" >&2
+    [[ -z "${opt[pretend]}" ]]
+}
+
+# $@  = ""
+# out = ""
+testing() {
+    [[ "$prog" == bats-exec-test ]]
+}
+
+# $@  = command
+# out = [ "echo" ] command
+testable() {
+    local -r comm="${*:?}"
+    testing && echo "echo $comm" || echo "$comm"
+}
+
+# $@  = output
+# out = output | ""
+out() {
+    local -r output="${*:?}"
+    testing || echo "$output"
+}
+
+# $@  = what where
+# out = where
+writef() {
+    local -r what="${1:?}" where="${2:?}"
+    if [[ -a "$where" && ! -f "$where" ]]; then
+        if ! testing && [[ "$where" -ef /dev/stdout ]]; then
+            echo -e "$what" >&6
+        else
+            echo -e "$what" >"$where"
+        fi
+    else
+        local tmp_file; tmp_file="$(mktemp)"; readonly tmp_file
+        [[ "${opt[no-backup]}" == 1 ]] || local -r backup_value=numbered
+        echo -e "$what" >"$tmp_file"
+        mv --backup="${backup_value:-none}" -f "$tmp_file" "$where"
+    fi
+    out "$where"
+}
+
+# $@  = ""
+# out = first_non_empty_line
+first_line() {
+    grep -P '\S'|head -n 1 || [[ "$?" -eq 141 ]] # don't fail on sigpipe
+}
+
+# $@  = file_name suffix
+# out = file_name_with_suffix
+add_suffix() {
+    local -r file_name="${1:?}" suffix="${2:?}"
+    case "${file_name##*.}" in
+        "$file_name") echo "${file_name}${suffix}";;
+        *) echo "${file_name%.*}${suffix}.${file_name##*.}";;
+    esac
+}
+
+# $@  = key
+# out = value
+get_old_config_value() {
+    local -r key="${1:?}"
+    sed -nr "s/^\s*${key}\s+(\S+)\s*.*/\1/p" "${opt[old_config_file]}"
+}
+
+# $@  = ""
+# out = new_user
+get_new_user() {
+    {
+        echo "${opt[user]}"
+        get_old_config_value user
+        echo openvpn
+    } | first_line
+}
+
+# $@  = new_user
+# out = new_group
+get_new_group() {
+    local -r new_user="${1:?}"
+    {
+        echo "${opt[group]}"
+        get_old_config_value group
+        echo "$new_user"
+    } | first_line
+}
+
+# $@  = ""
+# out = "tun" | "tap"
+get_dev_type() {
+    {
+        echo "${opt[device]}"|sed -nr 's/^(tun|tap).*/\1/p'
+        get_old_config_value dev-type
+        for s in 's/^\s*dev\s+(tun|tap).*/\1/p' 's/^\s*topology\s+[^#]+.*/tun/p' 's/^\s*(tun|tap)-\S+.*/\1/p'; do
+            sed -nr "$s" "${opt[old_config_file]}"
+        done
+    } | first_line
+}
+
+# $@  = ( "tun" | "tap" ) old_device
+# out = new_device
+get_new_device() {
+    local -r dev_type="${1:?}" old_device="${2:?}"
+    local -r old_device_num="${old_device##*[!0-9]}"
+    case "${opt[device]}" in
+        "") for i in "${old_device_num:-0}" {0..99}; do
+                if ! ip link show "$dev_type$i-unrooted" >/dev/null 2>&1; then
+                    echo "$dev_type$i-unrooted"
+                    return
+                fi
+            done;;
+        *) echo "${opt[device]}";;
+    esac
+}
+
+# $@  = ""
+# out = old_down_file | ""
+get_old_down_file() {
+    {
+        get_old_config_value down
+        sed -nr 's/^\s*plugin\s+\S+openvpn-plugin-down-root.so\s+['\''"]?([^'\''"]+)\s*.*/\1/p' "${opt[old_config_file]}"
+    } | first_line || echo
+}
+
+# $@  = ( "up" | "down" ) old_updown_file
+# out = new_up_file | new_down_file
+get_new_updown_file() {
+    local -r ty="${1:?}" old_updown_file="${2:?}"
+    # shellcheck disable=SC2140
+    echo "${opt["${ty}_file"]:-"$(add_suffix "${old_updown_file}" -unrooted)"}"
+}
+
+# $@  = [ old_iproute_file ] [ new_up_file ] [ new_down_file ] [ new_config_file ]
+# out = new_iproute_file
+get_new_iproute_file() {
+    local -r old_iproute_file="$1" new_up_file="$2" new_down_file="$3" new_config_file="$4"
+    {
+        echo "${opt[iproute_file]}"
+        [[ -z "$old_iproute_file" ]] || add_suffix "$old_iproute_file" -unrooted
+        for f in "$new_up_file" "$new_down_file" "$new_config_file"; do
+            [[ -z "$f" || -a "$f" && ! -f "$f" ]] || echo "$(realpath "$(dirname "$f")")"/ip-unrooted.sh
+        done
+        for d in /etc/openvpn/client /etc/openvpn; do
+            [[ ! -d "$d" ]] || echo "$d/ip-unrooted.sh"
+        done
+    } | first_line
+}
+
+# $@  = suggested_file_name
+# out = new_sudoers_file
+get_new_sudoers_file() {
+    local -r suggested_file_name="${1:?}"
+    if [[ ! -d /etc/sudoers.d ]]; then
+        local -r sudoers_default=/etc/sudoers
+    else
+        local -r sudoers_default="/etc/sudoers.d/$suggested_file_name"
+    fi
+    echo "${opt[sudoers_file]:-$sudoers_default}"
+}
+
+# $@  = new_group
+# out = new_group
+gen_group() {
+    local -r new_group="${1:?}"
+    local -r groupadd=($(testable groupadd))
+    if [[ -n "$new_group" ]] && ! getent group "$new_group" >/dev/null; then
+        maybe_verbose_maybe_pretend "Adding group $new_group" || return 0
+        "${groupadd[@]}" "$new_group" </dev/null
+        out "$new_group"
+    fi
+}
+
+# $@  = new_group new_user
+# out = new_user
+gen_user() {
+    local -r new_group="${1:?}" new_user="${2:?}"
+    local -r useradd=($(testable useradd))
+    if [[ -n "$new_user" ]] && ! getent passwd "$new_user" >/dev/null; then
+        maybe_verbose_maybe_pretend "Adding user $new_user" || return 0
+        "${useradd[@]}" -g "$new_group" -d / -s "$(which nologin)" "$new_user" </dev/null
+        out "$new_user"
+    fi
+}
+
+# $@  = new_user new_group new_iproute_file [ old_iproute_file ]
+# out = new_iproute_file
+gen_iproute_file() {
+    local -r new_user="${1:?}" new_group="${2:?}" new_iproute_file="${3:?}" old_iproute_file="$4"
+    maybe_verbose_maybe_pretend "Generating iproute file $new_iproute_file" || return 0
+    writef '#!/usr/bin/env bash\nexec sudo -u root '"${old_iproute_file:-$(which ip)}"' "$@"' "$new_iproute_file"
+    if [[ -f "$new_iproute_file" ]]; then
+        chown "$new_user:$new_group" "$new_iproute_file"
+        chmod u+x "$new_iproute_file"
+    fi
+}
+
+# $@  = new_config_file new_user new_group ( "tun" | "tap" ) new_device new_iproute_file [ new_up_file ] [ new_down_file ]
+# out = new_config_file
+gen_config_file() {
+    local -r new_config_file="${1:?}" new_user="${2:?}" new_group="${3:?}" dev_type="${4:?}" \
+             new_device="${5:?}" new_iproute_file="${6:?}" new_up_file="$7" new_down_file="$8"
+    maybe_verbose_maybe_pretend "Generating config file $new_config_file" || return 0
+    writef "$(
+        sed -r -e '/^\s*(dev|group|iproute|user)\s+\S+/d' \
+            -e '/^\s*persist-tun/d' \
+            -e "s,^(\s*down\s+)\S+(\s+#.*)?,\1$new_down_file\2,g" \
+            -e "s,^\s*plugin\s+\S+openvpn-plugin-down-root.so\s+[^#]+(\s+#.*)?,down $new_down_file\1,g" \
+            -e "s,^(\s*up\s+)\S+(\s+#.*)?,\1$new_up_file\2,g" \
+            "${opt[old_config_file]}"
+        echo -e "dev-type $dev_type\ndev $new_device\niproute $new_iproute_file"
+    )" "$new_config_file"
+    [[ ! -f "$new_config_file" ]] || chown "$new_user:$new_group" "$new_config_file"
+}
+
+# $@  = new_user new_sudoers_file [ old_up_file ] [ old_down_file ] [ old_iproute_file ]
+# out = new_sudoers_file | ""
+gen_sudoers_file() {
+    local -r new_user="${1:?}" new_sudoers_file="${2:?}" old_up_file="$3" old_down_file="$4" old_iproute_file="$5"
+    maybe_verbose_maybe_pretend "Generating sudoers file $new_sudoers_file" || return 0
+    local -r prefix=", NOPASSWD:SETENV: "
+    local -r up_entry="${old_up_file:+$prefix$old_up_file}"
+    if [[ "$old_up_file" != "$old_down_file" ]]; then
+        local -r down_entry="${old_down_file:+$prefix$old_down_file}"
+    fi
+    local -r contents="$new_user ALL=(ALL) NOPASSWD: ${old_iproute_file:-$(which ip)}$up_entry$down_entry"
+    if [[ "$new_sudoers_file" -ef /etc/sudoers ]]; then
+        local -r using_etc_sudoers=1
+    fi
+    if testing && [[ -z "$using_etc_sudoers" ]]; then
+        writef "$contents" "$new_sudoers_file"
+    else
+        echo "$contents"|VISUAL="tee -a" visudo -f "$new_sudoers_file" >/dev/null
+    fi
+    [[ -n "$using_etc_sudoers" ]] || out "$new_sudoers_file"
+}
+
+gen_up_file() { gen_updown_file up "$@"; }
+gen_down_file() { gen_updown_file down "$@"; }
+
+# $@  = ( "up" | "down" ) old_updown_file new_updown_file new_user new_group
+# out = new_updown_file
+gen_updown_file() {
+    local -r ty="${1:?}" old_updown_file="${2:?}" new_updown_file="${3:?}" new_user="${4:?}" new_group="${5:?}"
+    maybe_verbose_maybe_pretend "Generating $ty file $new_updown_file" || return 0
+    writef '#!/usr/bin/env bash\nexec sudo -u root -E '"$old_updown_file"' "$@"' "$new_updown_file"
+    if [[ -f "$new_updown_file" ]]; then
+        chown "$new_user:$new_group" "$new_updown_file"
+        chmod u+x "$new_updown_file"
+    fi
+}
+
+# $@  = ( "tun" | "tap" ) new_device new_user new_group new_netdev_file
+# out = new_netdev_file
+gen_netdev_file() {
+    local -r dev_type="${1:?}" new_device="${2:?}" new_user="${3:?}" new_group="${4:?}" new_netdev_file="${5:?}"
+    maybe_verbose_maybe_pretend "Generating netdev file $new_netdev_file" || return 0
+    writef "[NetDev]\nKind=$dev_type\nName=$new_device\n\n[${dev_type^}]\nGroup=$new_group\nUser=$new_user" "$new_netdev_file"
+    [[ ! -f "$new_netdev_file" ]] || chmod 644 "$new_netdev_file"
+}
+
+# $@  = new_user new_group new_unit_file
+# out = new_unit_file
+gen_unit_file() {
+    local -r new_user="${1:?}" new_group="${2:?}" new_unit_file="${3:?}"
+    maybe_verbose_maybe_pretend "Generating unit file $new_unit_file" || return 0
+    local -r path=/usr/lib/systemd/system
+    [[ ! -f "$path/openvpn-client@.service" ]] || local -r suf=-client
+    writef "$(
+        sed -r -e '/(User|Group)=/d' \
+            -e "s/^(\s*\[Service\]\s*)/\1\nUser=$new_user\nGroup=$new_group\nRuntimeDirectory=openvpn@%i/" \
+            -e "/^\s*(ExecStart|PIDFile)=/s,openvpn@%i\.pid,openvpn@%i/openvpn.pid," \
+            "$path/openvpn${suf}@.service"
+    )" "$new_unit_file"
+}
+
+# $@  = ( "tun" | "tap" ) new_device new_user new_group
+# out = new_device
+gen_device() {
+    local -r dev_type="${1:?}" new_device="${2:?}" new_user="${3:?}" new_group="${4:?}"
+    if ! ip link show "$new_device" >/dev/null 2>&1; then
+        maybe_verbose_maybe_pretend "Adding device $new_device" || return 0
+        local -r comm=(openvpn --mktun --dev-type "$dev_type" --dev "$new_device" --user "$new_user" --group "$new_group")
+        # shellcheck disable=SC2015
+        testing && echo "${comm[@]}" || "${comm[@]}" >/dev/null
+        out "$new_device"
+    fi
+}
+
+# $@  = primary_opt [ secondary_opts ]
+# out = ""
+validate_option() {
+    local -r primary_opt="${1:?}" secondary_opts=("${@:2}")
+    if [[ -n "${opt["$primary_opt"]}" ]]; then
+        local -r primary_opt_hyph="${primary_opt//_/-}"
+        if [[ -n "${opt["no-$primary_opt_hyph"]}" ]]; then
+            echo "ERROR: Option --${primary_opt_hyph} makes no sense in combination with --no-${primary_opt_hyph}" >&2
+            exit 1
+        fi
+        local -a missing=()
+        for o in "${secondary_opts[@]}"; do
+            [[ -n "${opt["$o"]}" ]] || missing+=("$o")
+        done
+        if [[ -n "${missing[*]}" ]]; then
+            local -r missing_tmp_1="${missing[*]/#/--}"
+            local -r missing_tmp_2="${missing_tmp_1//_/-}"
+            echo "ERROR: In the absence of --automagic, option --${primary_opt_hyph} requires ${missing_tmp_2// /, }" >&2
+            exit 1
+        fi
+    fi
+}
+
+# $@  = ""
+# out = ""
+validate_options() {
+    for o in config_file down_file iproute_file netdev_file sudoers_file unit_file up_file; do
+        validate_option "$o"
+    done
+    if [[ -z "${opt[automagic]}" && -z "${opt[pretend]}" && -z "${opt[config_file]}" && -z "${opt[iproute_file]}" &&
+          -z "${opt[netdev_file]}" && -z "${opt[sudoers_file]}" && -z "${opt[unit_file]}" && -z "${opt[up_file]}" &&
+          -z "${opt[down_file]}" ]]; then
+        echo "ERROR: In the absence of --automagic, at least one file-generating option is required" >&2
+        exit 1
+    fi
+    if [[ -z "${opt[automagic]}" ]]; then
+        validate_option config_file user group device iproute_file
+        validate_option netdev_file device user group
+        validate_option sudoers_file user
+        validate_option user group
+        for o in device down_file iproute_file unit_file up_file; do
+            validate_option "$o" user group
+        done
+    fi
+}
+
+# $@  = ""
+# out = ""
+auto_select_systemd_options() {
+    if [[ -n "${opt[automagic]}" ]]; then
+        if [[ ! -d /etc/systemd ]]; then
+            [[ -n "${opt[netdev-file]}" ]] || opt[no-netdev-file]=1
+            [[ -n "${opt[netdev-unit]}" ]] || opt[no-unit-file]=1
+        fi
+    fi
+}
+
+# $@  = new_user new_group [ files ]
+# out = ""
+check_accessibility() {
+    local -r new_user="${1:?}" new_group="${2:?}" files=("${@:3}")
+    if getent passwd "$new_user" >/dev/null && getent group "$new_group" >/dev/null; then
+        for file in "${files[@]}"; do
+            if [[ -n "$file" && -f "$file" ]] && ! sudo -u "$new_user" -g "$new_group" bash -c '[[ -r '"$file"' ]]'; then
+                echo "WARNING: $file cannot be read by user $new_user" >&2
+            fi
+        done
+    fi
+}
+
+# $@  = command_line
+# out = ""
+main() {
+    local loc=(dev_type ocf_dir ocf_root old_device old_down_file
+    old_iproute_file old_up_file new_config_file new_device new_down_file
+    new_netdev_file new_sudoers_file new_unit_file new_up_file new_user
+    new_iproute_file new_group)
+    local "${loc[@]}"
+
+    parse_command_line "$@"
+    validate_options
+    auto_select_systemd_options
+
+    dev_type="$(get_dev_type)"
+    ocf_dir="$(dirname "${opt[old_config_file]}")"
+    ocf_root="$(basename "${opt[old_config_file]%.*}")"
+    old_device="$(get_old_config_value dev)"
+    old_down_file="$(get_old_down_file)"
+    old_iproute_file="$(get_old_config_value iproute)"
+    old_up_file="$(get_old_config_value up)"
+    new_config_file="$(realpath "${opt[config_file]:-$ocf_dir/$ocf_root-unrooted.conf}")"
+    new_device="$(get_new_device "$dev_type" "$old_device")"
+    [[ -z "$old_down_file" ]] || new_down_file="$(get_new_updown_file down "$old_down_file")"
+    new_netdev_file="${opt[netdev_file]:-/etc/systemd/network/$new_device.netdev}"
+    new_sudoers_file="$(get_new_sudoers_file "$ocf_root-unrooted")"
+    new_unit_file="${opt[unit_file]:-/etc/systemd/system/openvpn@$ocf_root-unrooted.service}"
+    [[ -z "$old_up_file" ]] || new_up_file="$(get_new_updown_file up "$old_up_file")"
+    new_user="$(get_new_user)"
+
+    new_iproute_file="$(get_new_iproute_file "$old_iproute_file" "$new_up_file" "$new_down_file" "$new_config_file")"
+    new_group="$(get_new_group "$new_user")"
+
+    readonly "${loc[@]}"
+
+    maybe() {
+        local -r key="${1#gen_}"
+        local -r ty="${1##*_}"
+        if [[ -z "${opt["no-${key//_/-}"]}" &&
+            ( -z "${opt[automagic]}" && -n "${opt["$key"]}" || -n "${opt[automagic]}" ) ]]; then
+            local ret; ret=("$("$@")"); readonly ret
+            if [[ -n "${ret[@]}" ]]; then
+                case "$ty" in
+                    file) cleanup_files+=("${ret[@]}");;
+                    *) cleanup["$ty"]="${ret[*]}";;
+                esac
+            fi
+        fi
+    }
+
+    maybe gen_group "$new_group"
+    maybe gen_user "$new_group" "$new_user"
+    maybe gen_sudoers_file "$new_user" "$new_sudoers_file" "$old_up_file" "$old_down_file" "$old_iproute_file"
+    maybe gen_iproute_file "$new_user" "$new_group" "$new_iproute_file" "$old_iproute_file"
+    if [[ -n "$new_up_file" ]]; then
+        maybe gen_up_file "$old_up_file" "$new_up_file" "$new_user" "$new_group"
+    fi
+    if [[ -n "$new_down_file" && "$new_down_file" != "$new_up_file" ]]; then
+        maybe gen_down_file "$old_down_file" "$new_down_file" "$new_user" "$new_group"
+    fi
+    maybe gen_device "$dev_type" "$new_device" "$new_user" "$new_group"
+    maybe gen_netdev_file "$dev_type" "$new_device" "$new_user" "$new_group" "$new_netdev_file"
+    maybe gen_config_file "$new_config_file" "$new_user" "$new_group" "$dev_type" "$new_device" \
+                          "$new_iproute_file" "$new_up_file" "$new_down_file"
+    maybe gen_unit_file "$new_user" "$new_group" "$new_unit_file"
+
+    check_accessibility "$new_user" "$new_group" "$new_iproute_file" "$new_up_file" "$new_down_file" \
+                        "$new_config_file" "$(get_old_config_value auth-user-pass)"
+}
+
+# $@  = ""
+# out = ""
+cleanup() {
+    if [[ -n "${opt[verbose]}" && ( -n "${cleanup_files[@]}" || -n "${cleanup[@]}" ) ]]; then
+        echo "ERROR: Reverting all changes" >&2
+    fi
+    if [[ -n "${cleanup_files[@]}" ]]; then
+        if [[ -n "${opt[no-backup]}" ]]; then
+            rm -f "${cleanup_files[@]}"
+            unset cleanup_files
+        else
+            local i=0
+            for f in "${cleanup_files[@]}"; do
+                if [[ -f "$f" ]]; then
+                    local file last_backup owner path
+                    # shellcheck disable=SC2012
+                    owner="$(ls -l -- "$f"|cut -d' ' -f3)"
+                    path="$(dirname "$f")"
+                    file="$(basename "$f")"
+                    last_backup="$(find "$path" -maxdepth 1 -type f -user "$owner" -name "$file.~[0-9]*~" -print0|\
+                        sort -zrV|head -zn 1|tr -d '\0')"
+                    if [[ -n "$last_backup" && -f "$last_backup" ]]; then
+                        mv -f "$last_backup" "$f"
+                    else
+                        rm -f "$f"
+                    fi
+                fi
+                unset "cleanup_files[i++]"
+            done
+        fi
+    fi
+    if [[ -n "${cleanup[user]}" ]] && getent passwd "${cleanup[user]}" >/dev/null; then
+        userdel "${cleanup[user]}"
+    fi
+    unset "cleanup[user]"
+    if [[ -n "${cleanup[group]}" ]] && getent group "${cleanup[group]}" >/dev/null; then
+        groupdel "${cleanup[group]}"
+    fi
+    unset "cleanup[group]"
+    if [[ -n "${cleanup[device]}" ]] && ip link show "${cleanup[device]}" >/dev/null 2>&1; then
+        openvpn --rmtun --dev "${cleanup[device]}" >/dev/null
+    fi
+    unset "cleanup[device]"
+}
+trap cleanup INT TERM
+
+# $@  = line_number exit_code
+# out = ""
+err_msg() {
+    echo "$0: line $1: \`$(sed -n "$1,+0{s/^\s*//;p}" "$0")' returned $2" >&2
+    cleanup
+}
+trap 'err_msg "$LINENO" "$?"' ERR
+
+if ! testing; then
+    main "$@"
+fi
+
+exec 6>&-

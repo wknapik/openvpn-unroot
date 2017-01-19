@@ -1,3 +1,7 @@
+```
+BETA WARNING: this is not mature code. Requires much more testing. Works on Arch Linux (for this one guy). May cause premature balding. More tests and support for other distros to come. Feedback appreciated.
+```
+
 # What is openvpn-unroot ?
 
 `openvpn-unroot` is a script, that consumes an existing OpenVPN client config

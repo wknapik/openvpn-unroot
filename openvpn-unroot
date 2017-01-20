@@ -80,7 +80,16 @@ parse_command_line() {
                fi;;
         esac
     done
+    if [[ -n "${opt[automagic]}" ]]; then
+        if [[ ! -d /etc/systemd/network && -z "${opt[netdev-file]}" ]]; then
+            opt[no-netdev-file]=1
+        fi
+        if [[ ! -d /etc/systemd/system && -z "${opt[netdev-unit]}" ]]; then
+            opt[no-unit-file]=1
+        fi
+    fi
     opt[old_config_file]="$1"
+
     readonly opt
 
     if ! shift || [[ -n "$*" ]]; then
@@ -434,17 +443,6 @@ validate_options() {
     fi
 }
 
-# $@  = ""
-# out = ""
-auto_select_systemd_options() {
-    if [[ -n "${opt[automagic]}" ]]; then
-        if [[ ! -d /etc/systemd ]]; then
-            [[ -n "${opt[netdev-file]}" ]] || opt[no-netdev-file]=1
-            [[ -n "${opt[netdev-unit]}" ]] || opt[no-unit-file]=1
-        fi
-    fi
-}
-
 # $@  = new_user new_group [ files ]
 # out = ""
 check_accessibility() {
@@ -469,7 +467,6 @@ main() {
 
     parse_command_line "$@"
     validate_options
-    auto_select_systemd_options
 
     dev_type="$(get_dev_type)"
     ocf_dir="$(dirname "${opt[old_config_file]}")"

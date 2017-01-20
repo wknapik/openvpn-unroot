@@ -1,5 +1,6 @@
 # passable options: VERBOSE=1 SA_ALL=1
-# sa = static analysis, ut = unit tests, st = system tests
+# sa = static analysis, ut = unit tests, st = system tests, all = sa+ut+st
+# specific system/script st targets: fedora___random, archlinux___random, etc.
 MAKEFLAGS := -rR
 SHELL := /bin/bash
 is_parallel := $(if $(shell ps -p $${PPID} -o cmd|grep -P '\s+(--jobs|-\w*j(\s*[0-9]|\s|$$))'),1,)
@@ -15,7 +16,7 @@ st := $(sort $(subst /,___,$(patsubst $(st_root)/%.sh,%,$(foreach f,$(systems),$
 .PHONY: all clean sa st $(st) ut
 .$(VERBOSE)SILENT:
 .DELETE_ON_ERROR:
-.INTERMEDIATE: $(st_common)/vpngate.csv $(project_root)/openvpn-unroot.bash
+.INTERMEDIATE: $(project_root)/openvpn-unroot.bash
 
 all: sa ut st
 
@@ -36,15 +37,19 @@ $(st_common)/vpngate.csv:
 $(st_common)/random.conf: | $(st_common)/vpngate.csv
 	shuf -n1 "$|"|cut -d, -f15|tr -d '\r'|base64 --decode >"$@"
 
+fedora_deps := $(st_root)/fedora/fedora-rawhide-20161211.tar.xz
+$(fedora_deps):
+	wget -q https://github.com/fedora-cloud/docker-brew-fedora/raw/2ef6d0fb858c218e1170418865f0d85718da8c78/fedora-rawhide-20161211.tar.xz -O "$@"
+
 $(st): system = $(word 1,$(subst ___, ,$@))
 $(st): script = $(word 2,$(subst ___, ,$@.sh))
 $(filter %___random,$(st)): $(st_common)/random.conf
 .SECONDEXPANSION:
-$(st): %: $(st_root)/$$(system)/Dockerfile
+$(st): %: $(st_root)/$$(system)/Dockerfile $$($$(system)_deps)
 	docker build $(maybe_quiet) -t "openvpn-unroot/$(system):latest" -f "$<" "$(dir $<)" $(maybe_devnull)
 	docker run --rm --cap-add=NET_ADMIN --device /dev/net/tun -v "$(project_root)/openvpn-unroot:/usr/bin/openvpn-unroot" \
 	           $$(for f in $(st_root)/common/* $(st_root)/$(system)/*; do echo -v "$$f:/tmp/test/$$(basename $$f)"; done) \
 	           $(if $(is_parallel),,-it )-w "/tmp/test" openvpn-unroot/$(system):latest "./$(script)" $(maybe_devnull)
 
 clean:
-	rm -f $(project_root)/openvpn-unroot.bash $(st_common)/vpngate.csv $(st_common)/random.conf
+	rm -f "$(project_root)/openvpn-unroot.bash" "$(st_common)/vpngate.csv" "$(st_common)/random.conf" "$(fedora_deps)"

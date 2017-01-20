@@ -36,13 +36,21 @@ teardown() {
     assert_output foo
 }
 
-@test "get_new_group, generated" {
+@test "get_new_group, generated, config group" {
     local -A opt=([old_config_file]="$BATS_TEST_DIRNAME/test03.conf")
     run get_new_group foo
     assert_output nobody
 }
 
-@test "get_new_group, default" {
+@test "get_new_group, generated, usergroup" {
+    local -A opt=([old_config_file]="$BATS_TEST_DIRNAME/test01.conf")
+    local -r random_user="$(getent passwd|shuf -n1|cut -d: -f1)"
+    local -r random_user_group="$(getent group "$(getent passwd "$random_user"|cut -d: -f3)"|cut -d: -f1)"
+    run get_new_group "$random_user"
+    assert_output "$random_user_group"
+}
+
+@test "get_new_group, generated, user" {
     local -A opt=([old_config_file]="$BATS_TEST_DIRNAME/test01.conf")
     run get_new_group foo
     assert_output foo
@@ -65,10 +73,11 @@ teardown() {
 }
 
 @test "gen_user, existent" {
-    local -r random_group="$(getent group|shuf -n1|cut -d: -f1)"
     local -r random_user="$(getent passwd|shuf -n1|cut -d: -f1)"
+    local -r random_user_group="$(getent group "$(getent passwd "$random_user"|cut -d: -f3)"|cut -d: -f1)"
+    local -r random_group="$(getent group|grep -vxF "$random_user_group"|shuf -n1|cut -d: -f1)"
     run gen_user "$random_group" "$random_user"
-    assert_output ""
+    assert_output "usermod -aG $random_group $random_user"
 }
 
 @test "get_dev_type, no precedence" {

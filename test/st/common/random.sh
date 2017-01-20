@@ -9,5 +9,5 @@ while read -r -t 10 line; do
            echo "SUCCESS!"
            exit 0;;
     esac
-done < <(sudo -u openvpn -g network openvpn ./random-unrooted.conf)
+done < <(sudo -u openvpn openvpn ./random-unrooted.conf)
 exit 1

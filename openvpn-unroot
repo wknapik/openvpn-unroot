@@ -10,7 +10,7 @@ exec 6>&1
 # All globals.
 declare -A cleanup=() # keys: device, group, user
 declare -a cleanup_files=()
-declare -A opt=()
+declare -A opt=() # set readonly at the end of parse_command_line()
 readonly prog="$(basename "$0")"
 
 # $@  = ""
@@ -175,6 +175,9 @@ get_new_group() {
     {
         echo "${opt[group]}"
         get_old_config_value group
+        if gid="$(getent passwd "$new_user"|cut -d: -f3)"; then
+            getent group "$gid"|cut -d: -f1
+        fi
         echo "$new_user"
     } | first_line
 }
@@ -213,7 +216,7 @@ get_old_down_file() {
     {
         get_old_config_value down
         sed -nr 's/^\s*plugin\s+\S+openvpn-plugin-down-root.so\s+['\''"]?([^'\''"]+)\s*.*/\1/p' "${opt[old_config_file]}"
-    } | first_line || echo
+    } | first_line || true
 }
 
 # $@  = ( "up" | "down" ) old_updown_file
@@ -268,11 +271,16 @@ gen_group() {
 # out = new_user
 gen_user() {
     local -r new_group="${1:?}" new_user="${2:?}"
-    local -r useradd=($(testable useradd))
-    if [[ -n "$new_user" ]] && ! getent passwd "$new_user" >/dev/null; then
-        maybe_verbose_maybe_pretend "Adding user $new_user" || return 0
-        "${useradd[@]}" -g "$new_group" -d / -s "$(which nologin)" "$new_user" </dev/null
-        out "$new_user"
+    if [[ -n "$new_user" ]]; then
+        if ! getent passwd "$new_user" >/dev/null; then
+            maybe_verbose_maybe_pretend "Adding user $new_user" || return 0
+            local -r useradd=($(testable useradd))
+            "${useradd[@]}" -g "$new_group" -d / -s "$(which nologin)" "$new_user" </dev/null
+            out "$new_user"
+        else
+            local -r usermod=($(testable usermod))
+            "${usermod[@]}" -aG "$new_group" "$new_user" </dev/null
+        fi
     fi
 }
 
@@ -443,7 +451,7 @@ check_accessibility() {
     local -r new_user="${1:?}" new_group="${2:?}" files=("${@:3}")
     if getent passwd "$new_user" >/dev/null && getent group "$new_group" >/dev/null; then
         for file in "${files[@]}"; do
-            if [[ -n "$file" && -f "$file" ]] && ! sudo -u "$new_user" -g "$new_group" bash -c '[[ -r '"$file"' ]]'; then
+            if [[ -n "$file" && -f "$file" ]] && ! sudo -u "$new_user" bash -c '[[ -r '"$file"' ]]'; then
                 echo "WARNING: $file cannot be read by user $new_user" >&2
             fi
         done

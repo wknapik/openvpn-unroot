@@ -1,6 +1,3 @@
-# passable options: VERBOSE=1 SA_ALL=1
-# sa = static analysis, ut = unit tests, st = system tests, all = sa+ut+st
-# specific system/script st targets: fedora___random, archlinux___random, etc.
 MAKEFLAGS := -rR
 SHELL := /bin/bash
 is_parallel := $(if $(shell ps -p $${PPID} -o cmd|grep -P '\s+(--jobs|-\w*j(\s*[0-9]|\s|$$))'),1,)
@@ -10,8 +7,8 @@ maybe_quiet := $(if $(VERBOSE),,-q)
 st_root := $(project_root)/test/st
 st_common := $(st_root)/common
 systems := $(filter-out common,$(notdir $(wildcard $(st_root)/*)))
-st := $(sort $(subst /,___,$(patsubst $(st_root)/%.sh,%,$(foreach f,$(systems),$(wildcard $(st_root)/$f/*.sh)))) \
-             $(foreach s,$(systems),$s___$(patsubst %.sh,%,$(notdir $(wildcard $(st_common)/*.sh)))))
+st := $(sort $(subst /,+,$(patsubst $(st_root)/%.sh,%,$(foreach f,$(systems),$(wildcard $(st_root)/$f/*.sh)))) \
+             $(foreach s,$(systems),$s+$(patsubst %.sh,%,$(notdir $(wildcard $(st_common)/*.sh)))))
 
 .PHONY: all clean sa st $(st) ut
 .$(VERBOSE)SILENT:
@@ -24,7 +21,7 @@ sa: $(project_root)/openvpn-unroot
 	shellcheck -s bash $(if $(SA_ALL),,-e SC2155 )"$<"
 
 $(project_root)/openvpn-unroot.bash: %.bash: %
-	ln -s "$(@:%.bash=%)" "$@"
+	ln -s "$<" "$@"
 
 ut: | $(project_root)/openvpn-unroot.bash
 	! $(project_root)/test/ut/ut.bats $(UT_OPTS)|grep -P '^(not|#)'
@@ -34,12 +31,13 @@ st: $(st)
 $(st_common)/vpngate.csv:
 	curl -s http://www.vpngate.net/api/iphone/|tail -n +3|head -n -1 >"$@"
 
-$(st_common)/random.conf: | $(st_common)/vpngate.csv
+# Random config from vpngate.net.
+$(st_common)/vpngate.conf: | $(st_common)/vpngate.csv
 	shuf -n1 "$|"|cut -d, -f15|tr -d '\r'|base64 --decode >"$@"
 
-$(st): system = $(word 1,$(subst ___, ,$@))
-$(st): script = $(word 2,$(subst ___, ,$@.sh))
-$(filter %___random,$(st)): $(st_common)/random.conf
+$(st): system = $(word 1,$(subst +, ,$@))
+$(st): script = $(word 2,$(subst +, ,$@.sh))
+$(filter %+vpngate,$(st)): $(st_common)/vpngate.conf
 .SECONDEXPANSION:
 $(st): %: $(st_root)/$$(system)/Dockerfile $$($$(system)_deps)
 	docker build $(maybe_quiet) -t "openvpn-unroot/$(system):latest" -f "$<" "$(dir $<)" $(maybe_devnull)
@@ -49,4 +47,4 @@ $(st): %: $(st_root)/$$(system)/Dockerfile $$($$(system)_deps)
 			   $(if $(VERBOSE),verbose,) $(maybe_devnull)
 
 clean:
-	rm -f "$(project_root)/openvpn-unroot.bash" "$(st_common)/vpngate.csv" "$(st_common)/random.conf"
+	rm -f "$(project_root)/openvpn-unroot.bash" "$(st_common)/vpngate.csv" "$(st_common)/vpngate.conf"

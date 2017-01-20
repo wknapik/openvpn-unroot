@@ -44,7 +44,7 @@ $(st): %: $(st_root)/$$(system)/Dockerfile $$($$(system)_deps)
 	docker run --rm --cap-add=NET_ADMIN --device /dev/net/tun -v "$(project_root)/openvpn-unroot:/usr/bin/openvpn-unroot" \
 	           $$(for f in $(st_root)/common/* $(st_root)/$(system)/*; do echo -v "$$f:/tmp/test/$$(basename $$f)"; done) \
 	           $(if $(is_parallel),,-it )-w "/tmp/test" openvpn-unroot/$(system):latest "./$(script)" \
-			   $(if $(VERBOSE),verbose,) $(maybe_devnull)
+	           $(if $(VERBOSE),verbose,) $(maybe_devnull)
 
 clean:
 	rm -f "$(project_root)/openvpn-unroot.bash" "$(st_common)/vpngate.csv" "$(st_common)/vpngate.conf"

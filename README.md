@@ -1,7 +1,7 @@
 ```
-BETA WARNING: this is not mature code. Requires much more testing. Works on
-Arch Linux (for this one guy). May cause premature balding. More tests and
-support for other distros to come. Feedback appreciated.
+BETA WARNING: this is not mature code. The most basic tests pass on Arch,
+Debian Stretch, Fedora Rawhide (development releases chosen due to bash >=4.4
+requirement).
 ```
 
 # What is openvpn-unroot ?
@@ -97,11 +97,9 @@ switches to add.
 
 # What are the requirements/assumptions/limitations ?
 
-Requirements are minimal and should be met by any system running OpenVPN (list
-available
+Bash >=4.4 is required. Beyond that, dependencies are minimal and should be met
+by any system running OpenVPN (list available
 [here](https://github.com/wknapik/openvpn-unroot/blob/master/package/arch/PKGBUILD)).
-
-The only testing so far has been done on Arch Linux.
 
 The script needs to be run as root.
 
@@ -114,8 +112,8 @@ will be changed when version 2.4.1, containing a fix, is released.
 If a file that the chosen unprivileged user needs to be able to read is not
 readable to them, a warning will be issued. For example, in Arch Linux, the
 /etc/openvpn/client directory is not world-readable, so if any files end up
-being placed there, it will trigger the warning. Arch Linux users can pass
-`-g network` to `openvpn-unroot`, to avoid this issue.
+being placed there, it will trigger the warning. Arch users can pass `-g
+network` to `openvpn-unroot`, to avoid this issue.
 
 # What are the security implications of using openvpn-unroot ?
 

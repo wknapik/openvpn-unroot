@@ -51,6 +51,7 @@ parse_command_line() {
         -n "$prog" -- "$@" || true))
 
     set -- "${options[@]}"
+    # opt[] keys beginning with "no" use "-" instead of "_" between words.
     while true; do
         case "$1" in
             -a|--automagic) opt[automagic]=1; shift;;
@@ -81,10 +82,10 @@ parse_command_line() {
         esac
     done
     if [[ -n "${opt[automagic]}" ]]; then
-        if [[ ! -d /etc/systemd/network && -z "${opt[netdev-file]}" ]]; then
+        if [[ ! -d /etc/systemd/network && -z "${opt[netdev_file]}" ]]; then
             opt[no-netdev-file]=1
         fi
-        if [[ ! -d /etc/systemd/system && -z "${opt[netdev-unit]}" ]]; then
+        if [[ ! -d /etc/systemd/system && -z "${opt[netdev_unit]}" ]]; then
             opt[no-unit-file]=1
         fi
     fi

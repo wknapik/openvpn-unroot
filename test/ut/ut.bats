@@ -45,7 +45,7 @@ teardown() {
 @test "get_new_group, generated, usergroup" {
     local -A opt=([old_config_file]="$BATS_TEST_DIRNAME/test01.conf")
     local -r random_user="$(getent passwd|shuf -n1|cut -d: -f1)"
-    local -r random_user_group="$(getent group "$(getent passwd "$random_user"|cut -d: -f3)"|cut -d: -f1)"
+    local -r random_user_group="$(getent group "$(getent passwd "$random_user"|cut -d: -f4)"|cut -d: -f1)"
     run get_new_group "$random_user"
     assert_output "$random_user_group"
 }

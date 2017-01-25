@@ -8,9 +8,9 @@ shopt -s inherit_errexit
 exec 6>&1
 
 # All globals.
-declare -A cleanup=() # keys: device, group, user
-declare -a cleanup_files=()
-declare -A opt=() # set readonly at the end of parse_command_line()
+declare -A cleanup=() # assigned in main() and cleanup(); keys: device, group, user
+declare -a cleanup_files=() # assigned in main() and cleanup()
+declare -A opt=() # set readonly in parse_command_line()
 readonly prog="$(basename "$0")"
 
 # $@  = ""
@@ -185,7 +185,7 @@ get_new_group() {
     {
         echo "${opt[group]}"
         get_old_config_value group
-        if gid="$(getent passwd "$new_user"|cut -d: -f3)"; then
+        if gid="$(getent passwd "$new_user"|cut -d: -f4)"; then
             getent group "$gid"|cut -d: -f1
         fi
         echo "$new_user"
@@ -288,6 +288,7 @@ gen_user() {
             "${useradd[@]}" -g "$new_group" -d / -s "$(which nologin)" "$new_user" </dev/null
             out "$new_user"
         else
+            maybe_verbose_maybe_pretend "Adding user $new_user to group $new_group" || return 0
             local -r usermod=($(testable usermod))
             "${usermod[@]}" -aG "$new_group" "$new_user" </dev/null
         fi

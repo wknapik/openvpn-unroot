@@ -18,22 +18,34 @@ All of them:
 
 `make st`
 
-Or specific tests:
+Specific tests:
 
 `make <system>+<test>`
 
 where system is a directory directly under st/ (with a Dockerfile inside) and
 test is a shell script placed either in st/common, or one of the system
-directories.
+directories (minus the ".sh" suffix).
 
 e.g.:
 
 `make arch+vpngate`
 
+## Inspecting system tests
+
+To investigate a problem found during STs, an executable other than a test
+script can be called using the <system>+<executable> target format. E.g.:
+
+`make fedora+bash`
+
+will create the same container, as for any Fedora-based tests and run an
+interactive bash session in it.
+
+This mechanism is limited to executables in $PATH on the target system, due to
+the special meaning of "/" in make.
+
 ## Passable make variables
 
 VERBOSE=1 (print more output)  
-SA_ALL=1 (do not pass -e SC2155 to shellcheck)
 
 ## Notes
 

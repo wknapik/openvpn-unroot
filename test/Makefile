@@ -50,7 +50,7 @@ define docker_recipe
 	           $(if $(is_parallel),,-it )-w "/tmp/test" openvpn-unroot/$(system):latest \
 	           $(if $(wildcard $(st_root)/*/$(script).sh $(st_common)/$(script).sh),\
 	               "./$(script).sh" $(if $(VERBOSE),verbose,) $(maybe_devnull),\
-	               $(script))
+	               $(script) $(foreach a,$(EXE_ARGS),"$(a)") $(if $(EXE_ARG),"$(EXE_ARG)",))
 endef
 
 # Any target based on docker.

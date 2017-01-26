@@ -33,7 +33,11 @@ e.g.:
 ## Inspecting system tests
 
 To investigate a problem found during STs, an executable other than a test
-script can be called using the \<system\>+\<executable\> target format. E.g.:
+script can be called using the
+
+`make <system>+<executable>`
+
+pattern. E.g.:
 
 `make fedora+bash`
 
@@ -42,10 +46,13 @@ interactive bash session in it.
 
 This mechanism is limited to executables in $PATH on the target system, due to
 the special meaning of "/" in make.
+A single argument to the executable can be passed via EXE_ARG and multiple via
+EXE_ARGS (each will be quoted individually).
 
 ## Passable make variables
 
 VERBOSE=1 (print more output)  
+EXE_ARG and EXE_ARGS (see above)
 
 ## Notes
 

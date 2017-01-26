@@ -33,7 +33,7 @@ e.g.:
 ## Inspecting system tests
 
 To investigate a problem found during STs, an executable other than a test
-script can be called using the <system>+<executable> target format. E.g.:
+script can be called using the \<system\>+\<executable\> target format. E.g.:
 
 `make fedora+bash`
 
